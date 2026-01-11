@@ -7,7 +7,7 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-const CLIENT_URL = "http://localhost:5173"; 
+const CLIENT_URL = "https://client-six-vert-25.vercel.app";
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
 
