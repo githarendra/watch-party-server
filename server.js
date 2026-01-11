@@ -7,11 +7,12 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-const CLIENT_URL = "https://client-six-vert-25.vercel.app";
+// ✅ VERIFIED: Points to your Vercel App
+const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
 
-// ✅ CHANGED: path is now just "/" to avoid 404 errors
+// ✅ VERIFIED: Path is "/" to prevent 404 errors on Render
 const peerServer = ExpressPeerServer(server, { debug: true, path: "/", allow_discovery: true });
 app.use("/peerjs", peerServer);
 
@@ -39,8 +40,6 @@ io.on('connection', (socket) => {
     socketRoomMap[socket.id] = roomId;
 
     if (!roomUsers[roomId]) roomUsers[roomId] = [];
-    
-    // Remove existing
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username);
     roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
 
@@ -55,7 +54,6 @@ io.on('connection', (socket) => {
         clearTimeout(disconnectTimers[roomId]);
         delete disconnectTimers[roomId];
     }
-
     roomHosts[roomId] = socket.id;
     socketRoomMap[socket.id] = roomId;
     
@@ -98,12 +96,10 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('receive-message', data);
   });
 
-  // --- THIS WAS MISSING ---
   socket.on('stop-broadcast', (roomId) => {
     delete roomHosts[roomId];
     socket.to(roomId).emit('broadcast-stopped');
   });
-  // ------------------------
 
   socket.on('disconnect', () => {
     const roomId = socketRoomMap[socket.id];
