@@ -11,7 +11,8 @@ const CLIENT_URL = "https://client-six-vert-25.vercel.app";
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
 
-const peerServer = ExpressPeerServer(server, { debug: true, path: "/myapp", allow_discovery: true });
+// ✅ CHANGED: path is now just "/" to avoid 404 errors
+const peerServer = ExpressPeerServer(server, { debug: true, path: "/", allow_discovery: true });
 app.use("/peerjs", peerServer);
 
 const io = new Server(server, {
