@@ -7,6 +7,7 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
+// ✅ Your Vercel App URL
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -44,28 +45,23 @@ io.on('connection', (socket) => {
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
 
-    // ✅ Send Host Name to new user immediately
+    // ✅ SEND HOST NAME (If exists)
     if (roomDetails[roomId]) {
         socket.emit('host-name-update', roomDetails[roomId].hostName);
     }
   });
 
-  // ✅ Updated: Now accepts 'username' to store as Host Name
+  // ✅ RECEIVE HOST NAME
   socket.on('host-started-stream', ({ roomId, username }) => {
     roomHosts[roomId] = socket.id;
-    roomDetails[roomId] = { hostName: username }; // Store Name
     socketRoomMap[socket.id] = roomId;
+    
+    // Store name
+    roomDetails[roomId] = { hostName: username };
     
     socket.to(roomId).emit('stream-forced-refresh');
     socket.to(roomId).emit('host-name-update', username); // Tell everyone
     broadcastToHost(roomId);
-  });
-
-  socket.on('request-sync', (roomId) => {
-      const hostSocketId = roomHosts[roomId];
-      if (hostSocketId) {
-          io.to(hostSocketId).emit('request-sync-from-host', socket.id);
-      }
   });
 
   socket.on('viewer-status-update', ({ roomId, status }) => {
@@ -83,13 +79,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('video-sync', (data) => {
-    // If targetSocketId is provided, send ONLY to that user (Initial Sync)
-    if (data.targetSocketId) {
-        io.to(data.targetSocketId).emit('video-sync', data);
-    } else {
-        // Otherwise broadcast to room
-        socket.to(data.roomId).emit('video-sync', data);
-    }
+    socket.to(data.roomId).emit('video-sync', data);
   });
 
   socket.on('kick-user', ({ roomId, socketId }) => {
