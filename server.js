@@ -7,6 +7,7 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
+// ✅ Your Render/Vercel URL
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -37,15 +38,9 @@ io.on('connection', (socket) => {
     socketRoomMap[socket.id] = roomId;
 
     if (!roomUsers[roomId]) roomUsers[roomId] = [];
-    
-    // Remove existing user with same name to prevent duplicates
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username);
-    
-    // Add new user
     roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
 
-    console.log(`👤 ${username} joined ${roomId}`);
-    
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
   });
@@ -57,13 +52,21 @@ io.on('connection', (socket) => {
     broadcastToHost(roomId);
   });
 
-  // ✅ FIX: Update status in the list and notify Host
+  // ✅ FIX 1: Allow Viewer to request current status
+  socket.on('request-sync', (roomId) => {
+      const hostSocketId = roomHosts[roomId];
+      if (hostSocketId) {
+          // Tell Host: "Send data to THIS specific socket ID"
+          io.to(hostSocketId).emit('request-sync-from-host', socket.id);
+      }
+  });
+
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (roomUsers[roomId]) {
           const user = roomUsers[roomId].find(u => u.socketId === socket.id);
           if (user) {
               user.status = status;
-              broadcastToHost(roomId); 
+              broadcastToHost(roomId);
           }
       }
   });
@@ -73,7 +76,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('video-sync', (data) => {
-    socket.to(data.roomId).emit('video-sync', data);
+    // If targetSocketId exists, send ONLY to that user (Initial Sync)
+    if (data.targetSocketId) {
+        io.to(data.targetSocketId).emit('video-sync', data);
+    } else {
+        // Otherwise broadcast to everyone
+        socket.to(data.roomId).emit('video-sync', data);
+    }
   });
 
   socket.on('kick-user', ({ roomId, socketId }) => {
