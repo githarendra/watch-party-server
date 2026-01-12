@@ -7,6 +7,7 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
+// ✅ Your Render URL
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -20,10 +21,11 @@ const io = new Server(server, {
     methods: ["GET", "POST"], 
     credentials: true 
   },
-  transports: ['polling', 'websocket'] // ✅ Fixes connection stability
+  // ✅ FIX: Allow Polling first to ensure connection stability on Render
+  transports: ['polling', 'websocket'] 
 });
 
-// Unified Room State: { roomId: { hostSocket, hostName, users: [] } }
+// Unified Room Storage
 const rooms = {}; 
 const socketRoomMap = {}; 
 
@@ -45,10 +47,11 @@ io.on('connection', (socket) => {
       rooms[roomId].hostSocket = socket.id;
       rooms[roomId].hostName = username;
       
-      console.log(`🏠 Host registered: ${username} in ${roomId}`);
+      console.log(`🏠 Host registered: ${username}`);
 
-      // Sync existing viewers
+      // Sync existing viewers with Host Name
       socket.to(roomId).emit('host-name-update', username);
+      // Update Host with Viewer List
       broadcastToHost(roomId);
   });
 
@@ -59,7 +62,7 @@ io.on('connection', (socket) => {
 
     if (!rooms[roomId]) rooms[roomId] = { users: [] };
     
-    // Add User (avoid duplicates)
+    // Add User (prevent duplicates)
     rooms[roomId].users = rooms[roomId].users.filter(u => u.socketId !== socket.id);
     rooms[roomId].users.push({ socketId: socket.id, username, status: 'LIVE' });
 
@@ -68,7 +71,7 @@ io.on('connection', (socket) => {
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
 
-    // ✅ Send Host Name immediately
+    // ✅ FORCE SEND HOST NAME TO NEW VIEWER
     if (rooms[roomId].hostName) {
         socket.emit('host-name-update', rooms[roomId].hostName);
     }
@@ -124,7 +127,6 @@ io.on('connection', (socket) => {
   socket.on('stop-broadcast', (roomId) => {
     if (rooms[roomId]) {
         delete rooms[roomId].hostSocket;
-        // Keep users/name alive in case of refresh, but notify stop
         socket.to(roomId).emit('broadcast-stopped');
     }
   });
@@ -155,6 +157,8 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(3001, () => {
-  console.log('🚀 Server running on port 3001');
+// ✅ FIX: Use Process Environment Port for Render
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
