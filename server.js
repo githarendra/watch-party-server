@@ -22,7 +22,7 @@ const io = new Server(server, {
 const roomHosts = {}; 
 const roomUsers = {}; 
 const socketRoomMap = {}; 
-const roomDetails = {}; 
+const roomDetails = {}; // ✅ Stores Host Name
 
 const broadcastToHost = (roomId) => {
     const hostSocketId = roomHosts[roomId];
@@ -34,6 +34,20 @@ const broadcastToHost = (roomId) => {
 io.on('connection', (socket) => {
   console.log("✅ Connected:", socket.id);
 
+  // ✅ 1. Host registers immediately on load
+  socket.on('register-host', ({ roomId, username }) => {
+      roomHosts[roomId] = socket.id;
+      socketRoomMap[socket.id] = roomId;
+      roomDetails[roomId] = { hostName: username };
+      
+      // If users are already there, send them the name
+      socket.to(roomId).emit('host-name-update', username);
+      
+      // Update Host with current list (if any)
+      broadcastToHost(roomId);
+  });
+
+  // ✅ 2. Viewer Joins
   socket.on('join-room', (roomId, userId, username) => {
     socket.join(roomId);
     socketRoomMap[socket.id] = roomId;
@@ -42,17 +56,18 @@ io.on('connection', (socket) => {
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username);
     roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
 
+    // Notify Host
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
 
+    // ✅ SEND HOST NAME IMMEDIATELY
     if (roomDetails[roomId]) {
         socket.emit('host-name-update', roomDetails[roomId].hostName);
     }
   });
 
   socket.on('host-started-stream', ({ roomId, username }) => {
-    roomHosts[roomId] = socket.id;
-    socketRoomMap[socket.id] = roomId;
+    roomHosts[roomId] = socket.id; // Re-confirm host socket
     roomDetails[roomId] = { hostName: username };
     
     socket.to(roomId).emit('stream-forced-refresh');
