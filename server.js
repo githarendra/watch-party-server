@@ -22,6 +22,7 @@ const io = new Server(server, {
 const roomHosts = {}; 
 const roomUsers = {}; 
 const socketRoomMap = {}; 
+const roomDetails = {}; 
 
 const broadcastToHost = (roomId) => {
     const hostSocketId = roomHosts[roomId];
@@ -43,16 +44,22 @@ io.on('connection', (socket) => {
 
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
+
+    if (roomDetails[roomId]) {
+        socket.emit('host-name-update', roomDetails[roomId].hostName);
+    }
   });
 
-  socket.on('host-started-stream', (roomId) => {
+  socket.on('host-started-stream', ({ roomId, username }) => {
     roomHosts[roomId] = socket.id;
     socketRoomMap[socket.id] = roomId;
+    roomDetails[roomId] = { hostName: username };
+    
     socket.to(roomId).emit('stream-forced-refresh');
+    socket.to(roomId).emit('host-name-update', username);
     broadcastToHost(roomId);
   });
 
-  // ✅ FIX: Route the sync request from Viewer -> Host
   socket.on('request-sync', (roomId) => {
       const hostSocketId = roomHosts[roomId];
       if (hostSocketId) {
@@ -74,7 +81,6 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('receive-message', data);
   });
 
-  // ✅ FIX: Handle targeted sync (for new joiners) vs broadcast sync
   socket.on('video-sync', (data) => {
     if (data.targetSocketId) {
         io.to(data.targetSocketId).emit('video-sync', data);
@@ -93,6 +99,7 @@ io.on('connection', (socket) => {
 
   socket.on('stop-broadcast', (roomId) => {
     delete roomHosts[roomId];
+    delete roomDetails[roomId];
     socket.to(roomId).emit('broadcast-stopped');
   });
 
@@ -106,6 +113,7 @@ io.on('connection', (socket) => {
         if (roomHosts[roomId] === socket.id) {
             io.to(roomId).emit('broadcast-stopped'); 
             delete roomHosts[roomId];
+            delete roomDetails[roomId];
         }
         delete socketRoomMap[socket.id];
     }
