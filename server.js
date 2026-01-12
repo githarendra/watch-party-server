@@ -7,7 +7,7 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Your Vercel App URL
+// ✅ Your Render/Vercel URL
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -22,7 +22,8 @@ const io = new Server(server, {
 const roomHosts = {}; 
 const roomUsers = {}; 
 const socketRoomMap = {}; 
-const roomDetails = {}; // ✅ Stores Host Names
+// ✅ NEW: Store Room Details (Host Name)
+const roomDetails = {}; 
 
 const broadcastToHost = (roomId) => {
     const hostSocketId = roomHosts[roomId];
@@ -45,22 +46,22 @@ io.on('connection', (socket) => {
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
 
-    // ✅ SEND HOST NAME (If exists)
+    // ✅ SEND HOST NAME TO NEW JOINER
     if (roomDetails[roomId]) {
         socket.emit('host-name-update', roomDetails[roomId].hostName);
     }
   });
 
-  // ✅ RECEIVE HOST NAME
+  // ✅ RECEIVE HOST NAME FROM HOST
   socket.on('host-started-stream', ({ roomId, username }) => {
     roomHosts[roomId] = socket.id;
     socketRoomMap[socket.id] = roomId;
     
-    // Store name
+    // Store it
     roomDetails[roomId] = { hostName: username };
     
     socket.to(roomId).emit('stream-forced-refresh');
-    socket.to(roomId).emit('host-name-update', username); // Tell everyone
+    socket.to(roomId).emit('host-name-update', username); // Update everyone
     broadcastToHost(roomId);
   });
 
