@@ -7,6 +7,7 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
+// ✅ Your Render URL
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -18,12 +19,13 @@ const io = new Server(server, {
   cors: { origin: CLIENT_URL, methods: ["GET", "POST"], credentials: true }
 });
 
-const roomHosts = {}; 
-const roomUsers = {}; 
-const socketRoomMap = {}; 
-const roomDetails = {}; 
+// State Storage
+const roomHosts = {}; // { roomId: hostSocketId }
+const roomUsers = {}; // { roomId: [ { socketId, username, status } ] }
+const socketRoomMap = {}; // { socketId: roomId }
+const roomDetails = {}; // { roomId: { hostName: "..." } }
 
-// Helper to update the Host UI
+// Helper to update the Host
 const broadcastToHost = (roomId) => {
     const hostSocketId = roomHosts[roomId];
     if (hostSocketId && roomUsers[roomId]) {
@@ -34,41 +36,44 @@ const broadcastToHost = (roomId) => {
 io.on('connection', (socket) => {
   console.log("✅ Connected:", socket.id);
 
-  // 1. Host Registers (Load)
+  // 1️⃣ Host Registers (Load Page)
   socket.on('register-host', ({ roomId, username }) => {
+      socket.join(roomId);
       roomHosts[roomId] = socket.id;
       socketRoomMap[socket.id] = roomId;
       roomDetails[roomId] = { hostName: username };
       
-      // Sync anyone already there
+      // If viewers are already there, update them
       socket.to(roomId).emit('host-name-update', username);
+      
+      // Send current list to the (re)connected host
       broadcastToHost(roomId);
   });
 
-  // 2. Viewer Joins
+  // 2️⃣ Viewer Joins
   socket.on('join-room', (roomId, userId, username) => {
     socket.join(roomId);
     socketRoomMap[socket.id] = roomId;
 
     if (!roomUsers[roomId]) roomUsers[roomId] = [];
     
-    // Remove duplicates based on socket ID or username
+    // Prevent duplicates
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username && u.socketId !== socket.id);
     
     // Add User
-    roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
+    roomUsers[roomId].push({ socketId: socket.id, username, status: 'Joining...' });
 
-    // Notify Host immediately
+    // Notify Host
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
 
-    // ✅ FORCE SEND HOST NAME TO NEW VIEWER
+    // Send Host Name to New Viewer
     if (roomDetails[roomId]) {
         socket.emit('host-name-update', roomDetails[roomId].hostName);
     }
   });
 
-  // 3. Host Starts Broadcast (Re-confirm details)
+  // 3️⃣ Host Starts Stream
   socket.on('host-started-stream', ({ roomId, username }) => {
     roomHosts[roomId] = socket.id;
     roomDetails[roomId] = { hostName: username };
@@ -78,6 +83,7 @@ io.on('connection', (socket) => {
     broadcastToHost(roomId);
   });
 
+  // 4️⃣ Sync Handshake (Viewer asks, Host answers)
   socket.on('request-sync', (roomId) => {
       const hostSocketId = roomHosts[roomId];
       if (hostSocketId) {
@@ -85,6 +91,7 @@ io.on('connection', (socket) => {
       }
   });
 
+  // 5️⃣ Status Updates
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (roomUsers[roomId]) {
           const user = roomUsers[roomId].find(u => u.socketId === socket.id);
@@ -124,12 +131,10 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const roomId = socketRoomMap[socket.id];
     if (roomId) {
-        // If Viewer Left
         if (roomUsers[roomId]) {
             roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socket.id);
             broadcastToHost(roomId);
         }
-        // If Host Left
         if (roomHosts[roomId] === socket.id) {
             io.to(roomId).emit('broadcast-stopped'); 
             delete roomHosts[roomId];
