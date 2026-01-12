@@ -7,7 +7,6 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Your Render/Vercel URL
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -22,6 +21,7 @@ const io = new Server(server, {
 const roomHosts = {}; 
 const roomUsers = {}; 
 const socketRoomMap = {}; 
+const roomDetails = {}; // ✅ Stores Host Names
 
 const broadcastToHost = (roomId) => {
     const hostSocketId = roomHosts[roomId];
@@ -43,16 +43,31 @@ io.on('connection', (socket) => {
 
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
+
+    // ✅ Send Host Name to new user immediately
+    if (roomDetails[roomId]) {
+        socket.emit('host-name-update', roomDetails[roomId].hostName);
+    }
   });
 
-  socket.on('host-started-stream', (roomId) => {
+  // ✅ Updated: Now accepts 'username' to store as Host Name
+  socket.on('host-started-stream', ({ roomId, username }) => {
     roomHosts[roomId] = socket.id;
+    roomDetails[roomId] = { hostName: username }; // Store Name
     socketRoomMap[socket.id] = roomId;
+    
     socket.to(roomId).emit('stream-forced-refresh');
+    socket.to(roomId).emit('host-name-update', username); // Tell everyone
     broadcastToHost(roomId);
   });
 
-  // ✅ Status Updates (For the "Watching/Paused" indicator)
+  socket.on('request-sync', (roomId) => {
+      const hostSocketId = roomHosts[roomId];
+      if (hostSocketId) {
+          io.to(hostSocketId).emit('request-sync-from-host', socket.id);
+      }
+  });
+
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (roomUsers[roomId]) {
           const user = roomUsers[roomId].find(u => u.socketId === socket.id);
@@ -68,7 +83,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('video-sync', (data) => {
-    socket.to(data.roomId).emit('video-sync', data);
+    // If targetSocketId is provided, send ONLY to that user (Initial Sync)
+    if (data.targetSocketId) {
+        io.to(data.targetSocketId).emit('video-sync', data);
+    } else {
+        // Otherwise broadcast to room
+        socket.to(data.roomId).emit('video-sync', data);
+    }
   });
 
   socket.on('kick-user', ({ roomId, socketId }) => {
@@ -81,6 +102,7 @@ io.on('connection', (socket) => {
 
   socket.on('stop-broadcast', (roomId) => {
     delete roomHosts[roomId];
+    delete roomDetails[roomId];
     socket.to(roomId).emit('broadcast-stopped');
   });
 
@@ -94,6 +116,7 @@ io.on('connection', (socket) => {
         if (roomHosts[roomId] === socket.id) {
             io.to(roomId).emit('broadcast-stopped'); 
             delete roomHosts[roomId];
+            delete roomDetails[roomId];
         }
         delete socketRoomMap[socket.id];
     }
