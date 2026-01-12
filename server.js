@@ -7,6 +7,7 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
+// ✅ Your Vercel App URL
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -18,128 +19,118 @@ const io = new Server(server, {
   cors: { origin: CLIENT_URL, methods: ["GET", "POST"], credentials: true }
 });
 
-const roomHosts = {}; 
-const roomUsers = {}; 
-const socketRoomMap = {}; 
-const roomDetails = {}; // ✅ Stores Host Name
-
-// Helper: Send updated user list to the Host
-const broadcastToHost = (roomId) => {
-    const hostSocketId = roomHosts[roomId];
-    if (hostSocketId && roomUsers[roomId]) {
-        io.to(hostSocketId).emit('update-user-list', roomUsers[roomId]);
-    }
-};
+// Store State
+const rooms = {}; // Structure: { roomId: { hostSocket: '...', hostName: '...', users: [] } }
 
 io.on('connection', (socket) => {
   console.log("✅ Connected:", socket.id);
 
-  socket.on('join-room', (roomId, userId, username) => {
+  // 1️⃣ HOST STARTS STREAM
+  socket.on('host-joined', ({ roomId, username }) => {
     socket.join(roomId);
-    socketRoomMap[socket.id] = roomId;
+    
+    // Initialize Room
+    if (!rooms[roomId]) rooms[roomId] = { users: [] };
+    rooms[roomId].hostSocket = socket.id;
+    rooms[roomId].hostName = username;
 
-    // 1. Add User to List
-    if (!roomUsers[roomId]) roomUsers[roomId] = [];
-    // Remove duplicates
-    roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username);
-    roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
+    console.log(`Host ${username} created room ${roomId}`);
+    
+    // Broadcast Host Name to anyone already there
+    io.to(roomId).emit('host-name', username);
+  });
 
-    // 2. Notify Host
-    broadcastToHost(roomId);
-    socket.to(roomId).emit('user-connected', userId);
+  // 2️⃣ VIEWER JOINS
+  socket.on('viewer-joined', ({ roomId, username }) => {
+    socket.join(roomId);
 
-    // 3. Send Host Name to the new Viewer
-    if (roomDetails[roomId]) {
-        socket.emit('host-name-update', roomDetails[roomId].hostName);
+    if (!rooms[roomId]) rooms[roomId] = { users: [] };
+    
+    // Add to User List
+    const user = { socketId: socket.id, username, status: 'Joining...' };
+    rooms[roomId].users.push(user);
+
+    // Send Host Name to Viewer
+    if (rooms[roomId].hostName) {
+        socket.emit('host-name', rooms[roomId].hostName);
+    }
+
+    // Notify Host of new User
+    if (rooms[roomId].hostSocket) {
+        io.to(rooms[roomId].hostSocket).emit('update-user-list', rooms[roomId].users);
     }
   });
 
-  // ✅ Host starts stream: Store Name & Map Socket
-  socket.on('host-started-stream', ({ roomId, username }) => {
-    roomHosts[roomId] = socket.id;
-    socketRoomMap[socket.id] = roomId;
-    roomDetails[roomId] = { hostName: username }; // Store Name
-    
-    socket.to(roomId).emit('stream-forced-refresh');
-    socket.to(roomId).emit('host-name-update', username);
-    broadcastToHost(roomId);
-  });
-
-  // ✅ SYNC FIX: Viewer asks for current time/state
+  // 3️⃣ VIEWER REQUESTS SYNC (The "Fix" for autoplay)
   socket.on('request-sync', (roomId) => {
-      const hostSocketId = roomHosts[roomId];
-      if (hostSocketId) {
-          // Ask host to send data specifically to THIS viewer
-          io.to(hostSocketId).emit('request-sync-from-host', socket.id);
+      if (rooms[roomId] && rooms[roomId].hostSocket) {
+          // Ask Host to send time info to THIS specific viewer
+          io.to(rooms[roomId].hostSocket).emit('send-sync-to-new-viewer', socket.id);
       }
   });
 
-  // ✅ STATUS FIX: Viewer reports "I Paused" or "I am Watching"
+  // 4️⃣ HOST REPLIES WITH SYNC
+  socket.on('host-sync-data', ({ targetSocketId, time, isPlaying }) => {
+      io.to(targetSocketId).emit('force-sync', { time, isPlaying });
+  });
+
+  // 5️⃣ STATUS UPDATES (Viewer Pauses/Plays)
   socket.on('viewer-status-update', ({ roomId, status }) => {
-      if (roomUsers[roomId]) {
-          const user = roomUsers[roomId].find(u => u.socketId === socket.id);
+      if (rooms[roomId]) {
+          const user = rooms[roomId].users.find(u => u.socketId === socket.id);
           if (user) {
               user.status = status;
-              broadcastToHost(roomId); // Update Host UI
+              // Tell Host
+              if (rooms[roomId].hostSocket) {
+                  io.to(rooms[roomId].hostSocket).emit('update-user-list', rooms[roomId].users);
+              }
           }
       }
   });
 
-  // Chat
-  socket.on('send-message', (data) => {
-    socket.to(data.roomId).emit('receive-message', data);
-  });
-
-  // Sync Video
+  // 6️⃣ GENERAL VIDEO SYNC (Host -> Everyone)
   socket.on('video-sync', (data) => {
-    if (data.targetSocketId) {
-        // Direct Sync (Initial Join)
-        io.to(data.targetSocketId).emit('video-sync', data);
-    } else {
-        // Broadcast Sync (Normal)
-        socket.to(data.roomId).emit('video-sync', data);
-    }
+      socket.to(data.roomId).emit('video-sync', data);
   });
 
-  // Kick User
+  // 7️⃣ CHAT
+  socket.on('send-message', (data) => {
+      socket.to(data.roomId).emit('receive-message', data);
+  });
+
+  // 8️⃣ KICK
   socket.on('kick-user', ({ roomId, socketId }) => {
-      io.to(socketId).emit('kicked'); // Tell viewer they are kicked
-      if (roomUsers[roomId]) {
-          roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socketId);
+      io.to(socketId).emit('kicked');
+      if (rooms[roomId]) {
+          rooms[roomId].users = rooms[roomId].users.filter(u => u.socketId !== socketId);
+          if (rooms[roomId].hostSocket) {
+              io.to(rooms[roomId].hostSocket).emit('update-user-list', rooms[roomId].users);
+          }
       }
-      broadcastToHost(roomId);
   });
 
-  socket.on('stop-broadcast', (roomId) => {
-    delete roomHosts[roomId];
-    delete roomDetails[roomId];
-    socket.to(roomId).emit('broadcast-stopped');
-  });
-
+  // 9️⃣ DISCONNECT
   socket.on('disconnect', () => {
-    const roomId = socketRoomMap[socket.id];
-    if (roomId) {
-        if (roomUsers[roomId]) {
-            roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socket.id);
-            broadcastToHost(roomId);
-        }
-        if (roomHosts[roomId] === socket.id) {
-            io.to(roomId).emit('broadcast-stopped'); 
-            delete roomHosts[roomId];
-            delete roomDetails[roomId];
-        }
-        delete socketRoomMap[socket.id];
-    }
-  });
-  
-  socket.on('leave-room', () => {
-      const roomId = socketRoomMap[socket.id];
-      if(roomId) {
-        if (roomUsers[roomId]) {
-            roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socket.id);
-            broadcastToHost(roomId);
-        }
-        delete socketRoomMap[socket.id];
+      // Find which room this socket was in
+      for (const roomId in rooms) {
+          const room = rooms[roomId];
+          
+          // If Host left
+          if (room.hostSocket === socket.id) {
+              io.to(roomId).emit('broadcast-stopped');
+              delete rooms[roomId]; // Close room
+              break;
+          }
+
+          // If Viewer left
+          const userIndex = room.users.findIndex(u => u.socketId === socket.id);
+          if (userIndex !== -1) {
+              room.users.splice(userIndex, 1);
+              if (room.hostSocket) {
+                  io.to(room.hostSocket).emit('update-user-list', room.users);
+              }
+              break;
+          }
       }
   });
 });
