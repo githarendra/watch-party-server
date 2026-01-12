@@ -7,7 +7,7 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Your Vercel App URL
+// ✅ Points to your Vercel App
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -23,7 +23,6 @@ const roomHosts = {};
 const roomUsers = {}; 
 const socketRoomMap = {}; 
 
-// Helper to update host UI
 const broadcastToHost = (roomId) => {
     const hostSocketId = roomHosts[roomId];
     if (hostSocketId && roomUsers[roomId]) {
@@ -53,13 +52,7 @@ io.on('connection', (socket) => {
     broadcastToHost(roomId);
   });
 
-  // ✅ RESTORED: Working Chat Logic
-  socket.on('send-message', (data) => {
-    // Send to everyone else (sender handles their own UI)
-    socket.to(data.roomId).emit('receive-message', data);
-  });
-
-  // ✅ RESTORED: Status Updates
+  // ✅ STATUS FIX: Listen for status updates
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (roomUsers[roomId]) {
           const user = roomUsers[roomId].find(u => u.socketId === socket.id);
@@ -68,6 +61,11 @@ io.on('connection', (socket) => {
               broadcastToHost(roomId);
           }
       }
+  });
+
+  // ✅ CHAT FIX: Send only to others
+  socket.on('send-message', (data) => {
+    socket.to(data.roomId).emit('receive-message', data);
   });
 
   socket.on('video-sync', (data) => {
