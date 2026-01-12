@@ -7,7 +7,7 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Your Render/Vercel URL
+// ✅ Your Render URL
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -52,11 +52,10 @@ io.on('connection', (socket) => {
     broadcastToHost(roomId);
   });
 
-  // ✅ FIX 1: Allow Viewer to request current status
+  // ✅ FIX: Route the sync request from Viewer -> Host
   socket.on('request-sync', (roomId) => {
       const hostSocketId = roomHosts[roomId];
       if (hostSocketId) {
-          // Tell Host: "Send data to THIS specific socket ID"
           io.to(hostSocketId).emit('request-sync-from-host', socket.id);
       }
   });
@@ -75,12 +74,11 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('receive-message', data);
   });
 
+  // ✅ FIX: Handle targeted sync (for new joiners) vs broadcast sync
   socket.on('video-sync', (data) => {
-    // If targetSocketId exists, send ONLY to that user (Initial Sync)
     if (data.targetSocketId) {
         io.to(data.targetSocketId).emit('video-sync', data);
     } else {
-        // Otherwise broadcast to everyone
         socket.to(data.roomId).emit('video-sync', data);
     }
   });
