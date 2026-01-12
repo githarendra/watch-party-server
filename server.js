@@ -22,8 +22,6 @@ const io = new Server(server, {
 const roomHosts = {}; 
 const roomUsers = {}; 
 const socketRoomMap = {}; 
-// ✅ NEW: Store Room Details (Host Name)
-const roomDetails = {}; 
 
 const broadcastToHost = (roomId) => {
     const hostSocketId = roomHosts[roomId];
@@ -45,26 +43,16 @@ io.on('connection', (socket) => {
 
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
-
-    // ✅ SEND HOST NAME TO NEW JOINER
-    if (roomDetails[roomId]) {
-        socket.emit('host-name-update', roomDetails[roomId].hostName);
-    }
   });
 
-  // ✅ RECEIVE HOST NAME FROM HOST
-  socket.on('host-started-stream', ({ roomId, username }) => {
+  socket.on('host-started-stream', (roomId) => {
     roomHosts[roomId] = socket.id;
     socketRoomMap[socket.id] = roomId;
-    
-    // Store it
-    roomDetails[roomId] = { hostName: username };
-    
     socket.to(roomId).emit('stream-forced-refresh');
-    socket.to(roomId).emit('host-name-update', username); // Update everyone
     broadcastToHost(roomId);
   });
 
+  // ✅ Status Updates (For the "Watching/Paused" indicator)
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (roomUsers[roomId]) {
           const user = roomUsers[roomId].find(u => u.socketId === socket.id);
@@ -93,7 +81,6 @@ io.on('connection', (socket) => {
 
   socket.on('stop-broadcast', (roomId) => {
     delete roomHosts[roomId];
-    delete roomDetails[roomId];
     socket.to(roomId).emit('broadcast-stopped');
   });
 
@@ -107,7 +94,6 @@ io.on('connection', (socket) => {
         if (roomHosts[roomId] === socket.id) {
             io.to(roomId).emit('broadcast-stopped'); 
             delete roomHosts[roomId];
-            delete roomDetails[roomId];
         }
         delete socketRoomMap[socket.id];
     }
