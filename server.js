@@ -18,122 +18,109 @@ const io = new Server(server, {
     methods: ["GET", "POST"], 
     credentials: true 
   },
-  transports: ['polling', 'websocket'] // ✅ Compatible Mode
+  // ✅ Essential for Render stability
+  transports: ['polling', 'websocket'] 
 });
 
-// ✅ "State 2" Simple Storage
-const roomHosts = {};      // roomId -> hostSocketId
-const roomUsers = {};      // roomId -> Array of users
-const roomHostNames = {};  // ✅ Stores Host Name securely
-const socketRoomMap = {}; 
+// STORAGE
+const rooms = {}; // { roomId: { hostSocket, hostName, users: [] } }
 
 const broadcastToHost = (roomId) => {
-    const hostSocketId = roomHosts[roomId];
-    if (hostSocketId && roomUsers[roomId]) {
-        io.to(hostSocketId).emit('update-user-list', roomUsers[roomId]);
+    if (rooms[roomId] && rooms[roomId].hostSocket) {
+        io.to(rooms[roomId].hostSocket).emit('update-user-list', rooms[roomId].users);
     }
 };
 
 io.on('connection', (socket) => {
-  console.log("✅ Connected:", socket.id);
+  console.log("✅ Socket Connected:", socket.id);
 
-  // 1️⃣ HOST REGISTERS
+  // 1️⃣ HOST REGISTERS (Heartbeat)
   socket.on('register-host', ({ roomId, username }) => {
       socket.join(roomId);
-      roomHosts[roomId] = socket.id;
-      roomHostNames[roomId] = username; // Store Name
-      socketRoomMap[socket.id] = roomId;
       
-      // Init Array
-      if (!roomUsers[roomId]) roomUsers[roomId] = [];
-
-      console.log(`👑 Host Registered: ${username}`);
+      if (!rooms[roomId]) rooms[roomId] = { users: [] };
+      rooms[roomId].hostSocket = socket.id;
+      rooms[roomId].hostName = username;
       
-      // Broadcast name to room
-      socket.to(roomId).emit('host-name', username);
+      // Send updates
       broadcastToHost(roomId);
+      socket.to(roomId).emit('host-name-update', username);
   });
 
-  // 2️⃣ VIEWER JOINS
-  socket.on('join-room', (roomId, userId, username) => {
-    socket.join(roomId);
-    socketRoomMap[socket.id] = roomId;
+  // 2️⃣ VIEWER JOINS (Callback Pattern)
+  socket.on('join-room', ({ roomId, username }, callback) => {
+      socket.join(roomId);
 
-    if (!roomUsers[roomId]) roomUsers[roomId] = [];
-    
-    // Remove duplicates
-    roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username);
-    
-    // Add User
-    roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
+      if (!rooms[roomId]) rooms[roomId] = { users: [] };
+      
+      // Update User List
+      const existingUser = rooms[roomId].users.find(u => u.socketId === socket.id);
+      if (!existingUser) {
+          rooms[roomId].users.push({ socketId: socket.id, username, status: 'LIVE' });
+      }
 
-    console.log(`👤 Viewer Joined: ${username}`);
+      console.log(`👤 Viewer ${username} joined ${roomId}`);
 
-    broadcastToHost(roomId);
-    
-    // If Peer ID is provided, tell Host to call
-    if (userId) {
-        socket.to(roomId).emit('user-connected', userId);
-    }
+      // Update Host UI
+      broadcastToHost(roomId);
 
-    // ✅ SEND HOST NAME IMMEDIATELY
-    if (roomHostNames[roomId]) {
-        socket.emit('host-name', roomHostNames[roomId]);
-    }
-  });
-
-  // 3️⃣ VIEWER STATUS (Updates "Watching/Paused")
-  socket.on('viewer-status-update', ({ roomId, status }) => {
-      if (roomUsers[roomId]) {
-          const user = roomUsers[roomId].find(u => u.socketId === socket.id);
-          if (user) {
-              user.status = status;
-              broadcastToHost(roomId);
-          }
+      // ✅ IMMEDIATE RESPONSE: Send Host Name back to Viewer
+      if (callback) {
+          callback({
+              hostName: rooms[roomId].hostName || "Party's Room"
+          });
       }
   });
 
-  // 4️⃣ SYNC
+  // 3️⃣ VIDEO CONNECTION REQUEST
+  socket.on('request-video-connection', ({ roomId, peerId }) => {
+      socket.to(roomId).emit('user-connected', peerId);
+  });
+
+  // 4️⃣ HEARTBEAT (Keep Alive)
+  socket.on('heartbeat', ({ roomId, username, role }) => {
+      if (!rooms[roomId]) return;
+      
+      if (role === 'host') {
+          rooms[roomId].hostSocket = socket.id;
+          rooms[roomId].hostName = username;
+      } else {
+          const user = rooms[roomId].users.find(u => u.username === username);
+          if (user) user.socketId = socket.id; // Refresh ID
+      }
+      broadcastToHost(roomId);
+  });
+
+  // Standard Sync/Messaging
   socket.on('request-sync', (roomId) => {
-      const hostSocketId = roomHosts[roomId];
-      if (hostSocketId) {
-          io.to(hostSocketId).emit('request-sync-from-host', socket.id);
+      if (rooms[roomId]?.hostSocket) {
+          io.to(rooms[roomId].hostSocket).emit('request-sync-from-host', socket.id);
       }
   });
 
   socket.on('video-sync', (data) => {
-    if (data.targetSocketId) {
-        io.to(data.targetSocketId).emit('video-sync', data);
-    } else {
-        socket.to(data.roomId).emit('video-sync', data);
-    }
+    if (data.targetSocketId) io.to(data.targetSocketId).emit('video-sync', data);
+    else socket.to(data.roomId).emit('video-sync', data);
   });
 
   socket.on('send-message', (data) => socket.to(data.roomId).emit('receive-message', data));
 
-  socket.on('kick-user', ({ roomId, socketId }) => {
-      io.to(socketId).emit('kicked');
-      if (roomUsers[roomId]) {
-          roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socketId);
+  socket.on('viewer-status-update', ({ roomId, status }) => {
+      if (rooms[roomId]) {
+          const user = rooms[roomId].users.find(u => u.socketId === socket.id);
+          if(user) { user.status = status; broadcastToHost(roomId); }
       }
-      broadcastToHost(roomId);
-  });
-
-  socket.on('stop-broadcast', (roomId) => {
-    delete roomHosts[roomId];
-    delete roomHostNames[roomId];
-    socket.to(roomId).emit('broadcast-stopped');
   });
 
   socket.on('disconnect', () => {
-    const roomId = socketRoomMap[socket.id];
-    if (roomId) {
-        if (roomUsers[roomId]) {
-            roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socket.id);
-            broadcastToHost(roomId);
-        }
-        delete socketRoomMap[socket.id];
-    }
+      // Basic cleanup - Heartbeat handles re-adds
+      for (const roomId in rooms) {
+          const idx = rooms[roomId].users.findIndex(u => u.socketId === socket.id);
+          if (idx !== -1) {
+              rooms[roomId].users.splice(idx, 1);
+              broadcastToHost(roomId);
+          }
+      }
   });
 });
 
