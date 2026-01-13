@@ -7,7 +7,6 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Allow Render/Vercel connections
 app.use(cors({ origin: "*", credentials: true }));
 
 const peerServer = ExpressPeerServer(server, { debug: true, path: "/", allow_discovery: true });
@@ -19,130 +18,106 @@ const io = new Server(server, {
     methods: ["GET", "POST"], 
     credentials: true 
   },
-  // ✅ FIX: 'polling' first fixes the "WebSocket failed" error on Render
-  transports: ['polling', 'websocket'] 
+  // ✅ FIX: Disable polling to fix Render EIO=4 error
+  transports: ['websocket'] 
 });
 
-// ✅ CENTRAL STORAGE (The "Old" Reliable Approach)
-const rooms = {}; // Structure: { roomId: { hostSocket, hostName, users: [] } }
+// Storage
+const roomHosts = {}; // roomId -> hostName
+const roomHostIds = {}; // roomId -> socketId
 
-const broadcastToHost = (roomId) => {
-    if (rooms[roomId] && rooms[roomId].hostSocket) {
-        io.to(rooms[roomId].hostSocket).emit('update-user-list', rooms[roomId].users);
-    }
+// ✅ Get accurate viewer count directly from Socket.IO engine
+const getViewerCount = (roomId) => {
+    const room = io.sockets.adapter.rooms.get(roomId);
+    return room ? room.size - 1 : 0; // Subtract 1 (The Host)
 };
 
 io.on('connection', (socket) => {
-  console.log("✅ Socket Connected:", socket.id);
+  console.log("✅ Socket Connected (WS Only):", socket.id);
 
-  // 1️⃣ HOST REGISTERS (Run this on load AND reconnect)
+  // 1️⃣ HOST REGISTRATION
   socket.on('register-host', ({ roomId, username }) => {
       socket.join(roomId);
+      roomHosts[roomId] = username;
+      roomHostIds[roomId] = socket.id;
       
-      if (!rooms[roomId]) rooms[roomId] = { users: [] };
+      console.log(`👑 Host Registered: ${username} in ${roomId}`);
       
-      // ✅ Update the Host's Socket ID immediately so they get updates
-      rooms[roomId].hostSocket = socket.id;
-      rooms[roomId].hostName = username;
-      
-      console.log(`👑 Host Registered: ${username} (Room: ${roomId})`);
-      
-      // Send the list back to the host immediately
-      broadcastToHost(roomId);
+      // Update Host with count
+      socket.emit('viewer-count-update', getViewerCount(roomId));
   });
 
-  // 2️⃣ VIEWER JOINS
-  socket.on('join-room', (roomId, userId, username) => {
-    socket.join(roomId);
+  // 2️⃣ VIEWER JOINS (With Callback for Host Name)
+  socket.on('join-room', ({ roomId, username }, callback) => {
+      socket.join(roomId);
+      
+      console.log(`👤 Viewer Joined: ${username}`);
 
-    if (!rooms[roomId]) rooms[roomId] = { users: [] };
-    
-    // Prevent duplicates
-    rooms[roomId].users = rooms[roomId].users.filter(u => u.socketId !== socket.id);
-    
-    // Add Viewer to List
-    rooms[roomId].users.push({ socketId: socket.id, username, status: 'LIVE' });
+      // Notify Host of new count
+      const hostSocket = roomHostIds[roomId];
+      if (hostSocket) {
+          io.to(hostSocket).emit('viewer-count-update', getViewerCount(roomId));
+          io.to(hostSocket).emit('user-connected', socket.id); // Trigger Peer Call
+      }
 
-    console.log(`👤 Viewer Joined: ${username}`);
-
-    // ✅ UPDATE HOST DASHBOARD
-    broadcastToHost(roomId);
-    
-    // ✅ TRIGGER VIDEO CONNECTION
-    socket.to(roomId).emit('user-connected', userId);
-
-    // ✅ SEND HOST NAME TO VIEWER
-    if (rooms[roomId].hostName) {
-        socket.emit('host-name', rooms[roomId].hostName);
-    }
+      // ✅ IMMEDIATE CALLBACK: Send Host Name to Viewer
+      if (callback) {
+          callback({ 
+              hostName: roomHosts[roomId] || "Party's Room" 
+          });
+      }
   });
 
-  // 3️⃣ HOST STARTS STREAM
-  socket.on('host-started-stream', ({ roomId, username }) => {
-    if (!rooms[roomId]) rooms[roomId] = { users: [] };
-    
-    rooms[roomId].hostSocket = socket.id;
-    rooms[roomId].hostName = username;
-    
-    socket.to(roomId).emit('stream-forced-refresh');
-    socket.to(roomId).emit('host-name', username); // Update existing viewers
-    broadcastToHost(roomId);
-  });
-
-  // 4️⃣ SYNC REQUEST
+  // 3️⃣ SYNC RELAY
   socket.on('request-sync', (roomId) => {
-      if (rooms[roomId] && rooms[roomId].hostSocket) {
-          io.to(rooms[roomId].hostSocket).emit('request-sync-from-host', socket.id);
+      const hostSocket = roomHostIds[roomId];
+      if (hostSocket) {
+          io.to(hostSocket).emit('request-sync-from-host', socket.id);
       }
   });
 
-  // 5️⃣ STATUS UPDATE (Watching/Paused)
-  socket.on('viewer-status-update', ({ roomId, status }) => {
-      if (rooms[roomId]) {
-          const user = rooms[roomId].users.find(u => u.socketId === socket.id);
-          if (user) {
-              user.status = status;
-              broadcastToHost(roomId);
-          }
-      }
-  });
-
-  // General Events
-  socket.on('send-message', (data) => socket.to(data.roomId).emit('receive-message', data));
-  
   socket.on('video-sync', (data) => {
-    if (data.targetSocketId) {
-        io.to(data.targetSocketId).emit('video-sync', data);
-    } else {
-        socket.to(data.roomId).emit('video-sync', data);
-    }
+      if (data.targetSocketId) {
+          io.to(data.targetSocketId).emit('video-sync', data);
+      } else {
+          socket.to(data.roomId).emit('video-sync', data);
+      }
   });
+
+  socket.on('viewer-status-update', ({ roomId, status }) => {
+      // Just relay to host for now if needed, or broadcast
+      const hostSocket = roomHostIds[roomId];
+      if(hostSocket) io.to(hostSocket).emit('viewer-status-update', { id: socket.id, status });
+  });
+
+  socket.on('send-message', (data) => socket.to(data.roomId).emit('receive-message', data));
 
   socket.on('kick-user', ({ roomId, socketId }) => {
       io.to(socketId).emit('kicked');
-      if (rooms[roomId]) {
-          rooms[roomId].users = rooms[roomId].users.filter(u => u.socketId !== socketId);
-          broadcastToHost(roomId);
-      }
+      // Update count after kick logic (socket leave happens on client disconnect usually)
   });
 
   socket.on('stop-broadcast', (roomId) => {
-    if(rooms[roomId]) delete rooms[roomId].hostSocket;
-    socket.to(roomId).emit('broadcast-stopped');
+      delete roomHosts[roomId];
+      delete roomHostIds[roomId];
+      socket.to(roomId).emit('broadcast-stopped');
   });
 
   socket.on('disconnect', () => {
-      for (const roomId in rooms) {
-          const room = rooms[roomId];
-          if (room.hostSocket === socket.id) {
-              // Host left
-              break;
-          }
-          const userIndex = room.users.findIndex(u => u.socketId === socket.id);
-          if (userIndex !== -1) {
-              room.users.splice(userIndex, 1);
-              broadcastToHost(roomId); // Update Host immediately
-              break;
+      // Check which rooms this socket was in to update counts
+      // socket.rooms is empty on disconnect, so we scan
+      for (const roomId in roomHostIds) {
+          if (roomHostIds[roomId] === socket.id) {
+              // Host disconnected
+              io.to(roomId).emit('broadcast-stopped');
+              delete roomHosts[roomId];
+              delete roomHostIds[roomId];
+          } else {
+              // Potentially a viewer, update host count
+              const hostSocket = roomHostIds[roomId];
+              if (hostSocket) {
+                  io.to(hostSocket).emit('viewer-count-update', getViewerCount(roomId));
+              }
           }
       }
   });
