@@ -7,89 +7,92 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Allow all origins to prevent connection blocking
-app.use(cors());
+// ✅ Allow all origins to prevent CORS blocks
+app.use(cors({ origin: "*", credentials: true }));
 
 const peerServer = ExpressPeerServer(server, { debug: true, path: "/", allow_discovery: true });
 app.use("/peerjs", peerServer);
 
 const io = new Server(server, {
   cors: { 
-    origin: "*", 
+    origin: "*", // ✅ Open access for stability
     methods: ["GET", "POST"], 
     credentials: true 
   },
-  // ✅ FIX: Force polling first (most compatible), then upgrade
+  // ✅ CRITICAL FIX: Force Polling first. This fixes the EIO=4 error.
   transports: ['polling', 'websocket'] 
 });
 
 // STABLE STORAGE
 const roomHosts = {};      // roomId -> socketId
 const roomNames = {};      // roomId -> "Harry's Room"
-const roomUsers = {};      // roomId -> Array of users
+const roomUsers = {};      // roomId -> Array of user objects
 
+// Helper: Send the updated user list to the Host
 const broadcastToHost = (roomId) => {
-    const hostSocket = roomHosts[roomId];
-    if (hostSocket && roomUsers[roomId]) {
-        io.to(hostSocket).emit('update-user-list', roomUsers[roomId]);
+    const hostSocketId = roomHosts[roomId];
+    if (hostSocketId && roomUsers[roomId]) {
+        io.to(hostSocketId).emit('update-user-list', roomUsers[roomId]);
     }
 };
 
 io.on('connection', (socket) => {
-  console.log("✅ Connected:", socket.id);
+  console.log("✅ Socket Connected:", socket.id);
 
-  // 1️⃣ HOST REGISTERS
+  // 1️⃣ HOST REGISTRATION (Fixes Host Name Persistence)
   socket.on('register-host', ({ roomId, username }) => {
       socket.join(roomId);
       roomHosts[roomId] = socket.id;
       roomNames[roomId] = username;
       
+      // If the room doesn't exist in users map, init it
       if (!roomUsers[roomId]) roomUsers[roomId] = [];
       
-      // Send name to anyone already there
+      console.log(`👑 Host Registered: ${username} in Room: ${roomId}`);
+      
+      // If viewers are already waiting, tell them the name now
       socket.to(roomId).emit('host-name-update', username);
+      // Update Host Dashboard
       broadcastToHost(roomId);
   });
 
-  // 2️⃣ VIEWER JOINS
+  // 2️⃣ VIEWER JOIN (Fixes Viewer Count)
   socket.on('join-room', (roomId, userId, username) => {
     socket.join(roomId);
 
     if (!roomUsers[roomId]) roomUsers[roomId] = [];
     
-    // Remove duplicates
+    // Remove any existing entry for this socket/user to prevent duplicates
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socket.id);
     
-    // Add User
-    roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
+    // Add the new viewer
+    roomUsers[roomId].push({ socketId: socket.id, username, status: 'Connecting...' });
 
-    // Update Host
+    console.log(`👤 Viewer Joined: ${username} (Count: ${roomUsers[roomId].length})`);
+
+    // ✅ UPDATE HOST: Send new count immediately
     broadcastToHost(roomId);
     
-    // Trigger Video Call
+    // ✅ TRIGGER VIDEO: Tell Host to call this user
     socket.to(roomId).emit('user-connected', userId);
 
-    // ✅ Send Host Name immediately
+    // ✅ UPDATE VIEWER: Send them the Host Name immediately
     if (roomNames[roomId]) {
         socket.emit('host-name-update', roomNames[roomId]);
     }
   });
 
-  // 3️⃣ FETCH NAME (Redundancy)
-  socket.on('get-host-name', (roomId) => {
-      if (roomNames[roomId]) {
-          socket.emit('host-name-update', roomNames[roomId]);
-      }
-  });
-
+  // 3️⃣ HOST STARTED STREAM (Re-syncs everything)
   socket.on('host-started-stream', ({ roomId, username }) => {
     roomHosts[roomId] = socket.id;
     roomNames[roomId] = username;
+    
     socket.to(roomId).emit('stream-forced-refresh');
     socket.to(roomId).emit('host-name-update', username);
     broadcastToHost(roomId);
   });
 
+  // 4️⃣ VIEWER STATUS (Updates "Watching" vs "Paused")
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (roomUsers[roomId]) {
           const user = roomUsers[roomId].find(u => u.socketId === socket.id);
@@ -102,9 +105,9 @@ io.on('connection', (socket) => {
 
   // Sync Handshake
   socket.on('request-sync', (roomId) => {
-      const hostSocket = roomHosts[roomId];
-      if (hostSocket) {
-          io.to(hostSocket).emit('request-sync-from-host', socket.id);
+      const hostSocketId = roomHosts[roomId];
+      if (hostSocketId) {
+          io.to(hostSocketId).emit('request-sync-from-host', socket.id);
       }
   });
 
@@ -133,22 +136,24 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-      // Cleanup logic
       for (const roomId in roomUsers) {
+          // Check if Viewer left
           const index = roomUsers[roomId].findIndex(u => u.socketId === socket.id);
           if (index !== -1) {
               roomUsers[roomId].splice(index, 1);
-              broadcastToHost(roomId);
+              broadcastToHost(roomId); // Update Host Count
               break;
           }
+          // Check if Host left
           if (roomHosts[roomId] === socket.id) {
-              // Host left
+              // We don't delete immediately to allow refresh, but we could notify
               break;
           }
       }
   });
 });
 
+// ✅ Use process.env.PORT for Render
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
