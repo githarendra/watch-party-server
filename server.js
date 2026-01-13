@@ -7,19 +7,22 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
-
-app.use(cors({ origin: CLIENT_URL, credentials: true }));
+app.use(cors());
 
 const peerServer = ExpressPeerServer(server, { debug: true, path: "/", allow_discovery: true });
 app.use("/peerjs", peerServer);
 
 const io = new Server(server, {
-  cors: { origin: CLIENT_URL, methods: ["GET", "POST"], credentials: true },
-  transports: ['polling', 'websocket']
+  cors: { 
+    origin: "*", // ✅ Allow all origins to fix connection blocking
+    methods: ["GET", "POST"], 
+    credentials: true 
+  },
+  transports: ['websocket', 'polling'], // ✅ Try WebSocket first for speed
+  pingTimeout: 60000, // ✅ Increase timeout for Render
+  pingInterval: 25000
 });
 
-// Simple Storage
 const roomHosts = {}; 
 const roomUsers = {}; 
 const socketRoomMap = {}; 
