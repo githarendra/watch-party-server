@@ -7,7 +7,6 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Your Render URL
 const CLIENT_URL = "https://client-six-vert-25.vercel.app"; 
 
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
@@ -21,19 +20,17 @@ const io = new Server(server, {
     methods: ["GET", "POST"], 
     credentials: true 
   },
-  // ✅ CRITICAL FIX: Allow polling to fix the "WebSocket failed" error
   transports: ['polling', 'websocket'] 
 });
 
-// ✅ OLD SIMPLE STORAGE
-const roomHosts = {};      // Map: roomId -> hostSocketId
-const roomUsers = {};      // Map: roomId -> [ { socketId, username, status } ]
-const roomHostNames = {};  // Map: roomId -> "Harry" (Simple Name Storage)
-const socketRoomMap = {};  // Map: socketId -> roomId
+// Storage
+const roomHosts = {};      // roomId -> hostSocketId
+const roomUsers = {};      // roomId -> [ { socketId, username, status } ]
+const roomHostNames = {};  // roomId -> "Harry" (Fixes the Room Name bug)
+const socketRoomMap = {};  // socketId -> roomId
 
 const broadcastToHost = (roomId) => {
     const hostSocketId = roomHosts[roomId];
-    // Only send if there is a host and users
     if (hostSocketId && roomUsers[roomId]) {
         io.to(hostSocketId).emit('update-user-list', roomUsers[roomId]);
     }
@@ -42,15 +39,15 @@ const broadcastToHost = (roomId) => {
 io.on('connection', (socket) => {
   console.log("✅ Connected:", socket.id);
 
-  // 1️⃣ HOST JOINS (Stores Name)
+  // 1️⃣ HOST JOINS
   socket.on('host-joined', ({ roomId, username }) => {
     socket.join(roomId);
     roomHosts[roomId] = socket.id;
     socketRoomMap[socket.id] = roomId;
     
-    // ✅ Store Name Permanently
+    // ✅ Store Name for Viewers
     roomHostNames[roomId] = username;
-
+    
     console.log(`👑 Host ${username} created room ${roomId}`);
     
     // Broadcast name to anyone already waiting
@@ -68,22 +65,23 @@ io.on('connection', (socket) => {
     // Remove duplicates
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username && u.socketId !== socket.id);
     
-    // Add User (Old Logic)
+    // ✅ Initialize User with Status
     roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
 
     console.log(`👤 Viewer ${username} joined ${roomId}`);
 
-    // Update Host
+    // Update Host with new count/list
     broadcastToHost(roomId);
+    
     socket.to(roomId).emit('user-connected', userId);
 
-    // ✅ SEND SAVED NAME IMMEDIATELY
+    // ✅ SEND HOST NAME IMMEDIATELY (Fixes "Party's Room" bug)
     if (roomHostNames[roomId]) {
         socket.emit('host-name', roomHostNames[roomId]);
     }
   });
 
-  // 3️⃣ SYNC HANDSHAKE (Fixes the "Viewer Paused at start" bug)
+  // 3️⃣ SYNC HANDSHAKE
   socket.on('request-sync', (roomId) => {
       const hostSocketId = roomHosts[roomId];
       if (hostSocketId) {
@@ -96,12 +94,13 @@ io.on('connection', (socket) => {
       io.to(targetSocketId).emit('video-sync', { type: state, time });
   });
 
-  // 5️⃣ VIEWER STATUS UPDATE
+  // 5️⃣ VIEWER STATUS UPDATE (Watching/Paused)
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (roomUsers[roomId]) {
           const user = roomUsers[roomId].find(u => u.socketId === socket.id);
           if (user) {
               user.status = status;
+              // Update Host
               broadcastToHost(roomId);
           }
       }
@@ -111,16 +110,21 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('receive-message', data);
   });
 
-  // General Sync (Host -> Everyone)
   socket.on('video-sync', (data) => {
     socket.to(data.roomId).emit('video-sync', data);
   });
 
+  // ✅ KICK USER FUNCTIONALITY
   socket.on('kick-user', ({ roomId, socketId }) => {
+      // 1. Notify User
       io.to(socketId).emit('kicked');
+      
+      // 2. Remove from List
       if (roomUsers[roomId]) {
           roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socketId);
       }
+      
+      // 3. Update Host UI
       broadcastToHost(roomId);
   });
 
@@ -149,7 +153,6 @@ io.on('connection', (socket) => {
   });
 });
 
-// ✅ Port Fix for Render
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
