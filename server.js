@@ -7,7 +7,6 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Allow all connections
 app.use(cors({ origin: "*", credentials: true }));
 
 const peerServer = ExpressPeerServer(server, { debug: true, path: "/", allow_discovery: true });
@@ -15,11 +14,12 @@ app.use("/peerjs", peerServer);
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  transports: ['polling', 'websocket'] // ✅ Fixes Render Connection
+  // ✅ FIX: Allow Polling to stabilize Render connections
+  transports: ['polling', 'websocket']
 });
 
-// ✅ Simple, Reliable Storage
-const rooms = {}; // roomId -> { hostSocket, hostName, users: [] }
+// ✅ STATE 2: Simple, Reliable Storage
+const rooms = {}; // { roomId: { hostSocket, hostName, users: [] } }
 
 const broadcastToHost = (roomId) => {
     if (rooms[roomId] && rooms[roomId].hostSocket) {
@@ -38,41 +38,44 @@ io.on('connection', (socket) => {
       rooms[roomId].hostSocket = socket.id;
       rooms[roomId].hostName = username;
       
-      console.log(`👑 Host Registered: ${username} (${roomId})`);
-      
-      // Update Host UI immediately
+      console.log(`👑 Host Registered: ${username}`);
       broadcastToHost(roomId);
   });
 
-  // 2️⃣ VIEWER JOINS (Standard Logic)
+  // 2️⃣ VIEWER JOINS (Callback Pattern)
   socket.on('join-room', ({ roomId, userId, username }, callback) => {
       socket.join(roomId);
 
       if (!rooms[roomId]) rooms[roomId] = { users: [] };
       
-      // Add User
-      const existingUser = rooms[roomId].users.find(u => u.socketId === socket.id);
+      // Add User (Avoid Duplicates)
+      const existingUser = rooms[roomId].users.find(u => u.username === username);
       if (!existingUser) {
           rooms[roomId].users.push({ socketId: socket.id, username, status: 'LIVE' });
+      } else {
+          existingUser.socketId = socket.id; // Update socket if reconnecting
       }
 
       console.log(`👤 Viewer Joined: ${username}`);
 
-      // A. Update Host Dashboard
+      // Update Host UI
       broadcastToHost(roomId);
       
-      // B. Tell Host to Call this Peer
-      socket.to(roomId).emit('user-connected', userId);
+      // Trigger Video (Only if userId exists)
+      if (userId) {
+          socket.to(roomId).emit('user-connected', userId);
+      }
 
-      // C. Send Host Name to Viewer (IMMEDIATELY)
+      // ✅ IMMEDIATE RESPONSE: Send Host Name to Viewer
       if (callback) {
-          callback({ hostName: rooms[roomId].hostName || "Party's Room" });
+          callback({
+              hostName: rooms[roomId].hostName || "Party's Room"
+          });
       }
   });
 
-  // 3️⃣ CHAT (Standard Room Emit)
+  // 3️⃣ CHAT
   socket.on('send-message', (data) => {
-      // Broadcast to everyone in the room (including sender if needed, but usually sender handles own UI)
       socket.to(data.roomId).emit('receive-message', data);
   });
 
@@ -94,24 +97,8 @@ io.on('connection', (socket) => {
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (rooms[roomId]) {
           const user = rooms[roomId].users.find(u => u.socketId === socket.id);
-          if (user) {
-              user.status = status;
-              broadcastToHost(roomId);
-          }
+          if(user) { user.status = status; broadcastToHost(roomId); }
       }
-  });
-
-  socket.on('kick-user', ({ roomId, socketId }) => {
-      io.to(socketId).emit('kicked');
-      if(rooms[roomId]) {
-          rooms[roomId].users = rooms[roomId].users.filter(u => u.socketId !== socketId);
-          broadcastToHost(roomId);
-      }
-  });
-
-  socket.on('stop-broadcast', (roomId) => {
-      if(rooms[roomId]) delete rooms[roomId].hostSocket;
-      socket.to(roomId).emit('broadcast-stopped');
   });
 
   socket.on('disconnect', () => {
