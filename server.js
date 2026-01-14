@@ -3,7 +3,7 @@ const http = require('http');
 const { Server } = require("socket.io");
 const { ExpressPeerServer } = require("peer");
 const cors = require('cors');
-const ytdl = require('@distube/ytdl-core'); 
+const axios = require('axios'); // ✅ NEW: For fetching from mirrors
 
 const app = express();
 const server = http.createServer(app);
@@ -24,65 +24,69 @@ const io = new Server(server, {
   transports: ['polling', 'websocket'] 
 });
 
-// 🍪 COOKIE SETUP
-let agent;
-try {
-    const cookieString = process.env.YOUTUBE_COOKIES;
-    if (cookieString) {
-        const cookies = JSON.parse(cookieString);
-        agent = ytdl.createAgent(cookies);
-        console.log("✅ YouTube Cookies loaded.");
-    }
-} catch (error) {
-    console.error("❌ Error parsing cookies:", error.message);
-}
+// Helper: Extract Video ID from any YouTube URL
+const getVideoId = (url) => {
+    const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
+    const match = url.match(regex);
+    return match ? match[1] : null;
+};
 
-// 📺 YOUTUBE ROUTE (UPDATED WITH ANDROID CLIENT FIX)
+// 📺 YOUTUBE PROXY ROUTE (Invidious Method)
 app.get('/youtube', async (req, res) => {
     const videoUrl = req.query.url;
-    if(!videoUrl) return res.status(400).send('No URL provided');
+    const videoId = getVideoId(videoUrl);
 
-    res.header('Content-Type', 'video/mp4');
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Cross-Origin-Resource-Policy', 'cross-origin');
+    if(!videoId) return res.status(400).send('Invalid YouTube URL');
 
-    try {
-        // 1. Get Info first using 'ANDROID' client (Less strict than WEB)
-        const info = await ytdl.getInfo(videoUrl, {
-            agent: agent,
-            // ⚠️ THIS IS THE KEY FIX: Pretend to be a Phone app
-            clients: ['ANDROID', 'IOS'] 
-        });
+    // List of reliable public instances (Mirrors)
+    const instances = [
+        "https://inv.tux.pizza",
+        "https://vid.puffyan.us",
+        "https://invidious.projectsegfau.lt",
+        "https://yt.artemislena.eu"
+    ];
 
-        // 2. Choose the best format that has both video + audio
-        const format = ytdl.chooseFormat(info.formats, { 
-            quality: '18', // Try 360p first (most reliable)
-            filter: 'audioandvideo' 
-        });
+    console.log(`🎥 Fetching YouTube ID: ${videoId}`);
 
-        if (!format) {
-             throw new Error("No compatible video format found.");
-        }
+    // Loop through instances until one works
+    for (const instance of instances) {
+        try {
+            // "itag=18" is standard 360p MP4 (Video+Audio combined)
+            const directStreamUrl = `${instance}/latest_version?id=${videoId}&itag=18`;
+            
+            console.log(`🔄 Trying mirror: ${instance}`);
 
-        // 3. Download that specific format
-        ytdl.downloadFromInfo(info, { format: format })
-            .pipe(res);
+            // Fetch the stream from the mirror
+            const response = await axios({
+                method: 'get',
+                url: directStreamUrl,
+                responseType: 'stream',
+                timeout: 10000 // 10s timeout
+            });
 
-    } catch (err) {
-        console.error("YouTube Stream Error:", err.message);
-        if (!res.headersSent) {
-            res.status(500).send("Stream Error: " + err.message);
+            // Set headers
+            res.header('Content-Type', 'video/mp4');
+            res.header('Access-Control-Allow-Origin', '*');
+            
+            // Pipe the clean stream to your frontend
+            response.data.pipe(res);
+            return; // ✅ Success, stop the loop
+
+        } catch (err) {
+            console.log(`⚠️ Mirror ${instance} failed, trying next...`);
         }
     }
+
+    // If all mirrors fail
+    res.status(500).send("All mirrors busy. Try again.");
 });
 
 // --- STANDARD WATCH PARTY LOGIC ---
 
-// Storage
-const roomHosts = {};      // roomId -> hostSocketId
-const roomUsers = {};      // roomId -> [ { socketId, username, status } ]
-const roomHostNames = {};  // roomId -> "Harry"
-const socketRoomMap = {};  // socketId -> roomId
+const roomHosts = {};      
+const roomUsers = {};      
+const roomHostNames = {};  
+const socketRoomMap = {};  
 
 const broadcastToHost = (roomId) => {
     const hostSocketId = roomHosts[roomId];
@@ -94,49 +98,36 @@ const broadcastToHost = (roomId) => {
 io.on('connection', (socket) => {
   console.log("✅ Connected:", socket.id);
 
-  // 1️⃣ HOST JOINS
   socket.on('host-joined', ({ roomId, username }) => {
     socket.join(roomId);
     roomHosts[roomId] = socket.id;
     socketRoomMap[socket.id] = roomId;
-    
     roomHostNames[roomId] = username;
     
     socket.to(roomId).emit('host-name', username);
     broadcastToHost(roomId);
   });
 
-  // 2️⃣ VIEWER JOINS
   socket.on('join-room', (roomId, userId, username) => {
     socket.join(roomId);
     socketRoomMap[socket.id] = roomId;
-
     if (!roomUsers[roomId]) roomUsers[roomId] = [];
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username && u.socketId !== socket.id);
     roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
-
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
-
-    if (roomHostNames[roomId]) {
-        socket.emit('host-name', roomHostNames[roomId]);
-    }
+    if (roomHostNames[roomId]) socket.emit('host-name', roomHostNames[roomId]);
   });
 
-  // 3️⃣ SYNC HANDSHAKE
   socket.on('request-sync', (roomId) => {
       const hostSocketId = roomHosts[roomId];
-      if (hostSocketId) {
-          io.to(hostSocketId).emit('request-sync-from-host', socket.id);
-      }
+      if (hostSocketId) io.to(hostSocketId).emit('request-sync-from-host', socket.id);
   });
 
-  // 4️⃣ HOST REPLIES TO SYNC
   socket.on('host-sync-data', ({ targetSocketId, time, state }) => {
       io.to(targetSocketId).emit('video-sync', { type: state, time });
   });
 
-  // 5️⃣ VIEWER STATUS UPDATE
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (roomUsers[roomId]) {
           const user = roomUsers[roomId].find(u => u.socketId === socket.id);
@@ -147,19 +138,12 @@ io.on('connection', (socket) => {
       }
   });
 
-  socket.on('send-message', (data) => {
-    socket.to(data.roomId).emit('receive-message', data);
-  });
-
-  socket.on('video-sync', (data) => {
-    socket.to(data.roomId).emit('video-sync', data);
-  });
+  socket.on('send-message', (data) => socket.to(data.roomId).emit('receive-message', data));
+  socket.on('video-sync', (data) => socket.to(data.roomId).emit('video-sync', data));
 
   socket.on('kick-user', ({ roomId, socketId }) => {
       io.to(socketId).emit('kicked');
-      if (roomUsers[roomId]) {
-          roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socketId);
-      }
+      if (roomUsers[roomId]) roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socketId);
       broadcastToHost(roomId);
   });
 
