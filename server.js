@@ -3,7 +3,7 @@ const http = require('http');
 const { Server } = require("socket.io");
 const { ExpressPeerServer } = require("peer");
 const cors = require('cors');
-const axios = require('axios'); // ✅ NEW: For fetching from mirrors
+const axios = require('axios'); 
 
 const app = express();
 const server = http.createServer(app);
@@ -24,61 +24,78 @@ const io = new Server(server, {
   transports: ['polling', 'websocket'] 
 });
 
-// Helper: Extract Video ID from any YouTube URL
+// Helper: Extract Video ID
 const getVideoId = (url) => {
     const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
     const match = url.match(regex);
     return match ? match[1] : null;
 };
 
-// 📺 YOUTUBE PROXY ROUTE (Invidious Method)
+// 📺 YOUTUBE PROXY ROUTE (Robust API Method)
 app.get('/youtube', async (req, res) => {
     const videoUrl = req.query.url;
     const videoId = getVideoId(videoUrl);
 
     if(!videoId) return res.status(400).send('Invalid YouTube URL');
 
-    // List of reliable public instances (Mirrors)
+    // ✅ NEW: Stronger List of Public Mirrors
     const instances = [
         "https://inv.tux.pizza",
+        "https://invidious.drgns.space",
+        "https://invidious.fdn.fr",
         "https://vid.puffyan.us",
-        "https://invidious.projectsegfau.lt",
-        "https://yt.artemislena.eu"
+        "https://invidious.perennialteks.com",
+        "https://yt.artemislena.eu",
+        "https://invidious.protokolla.fi"
     ];
 
     console.log(`🎥 Fetching YouTube ID: ${videoId}`);
 
-    // Loop through instances until one works
     for (const instance of instances) {
         try {
-            // "itag=18" is standard 360p MP4 (Video+Audio combined)
-            const directStreamUrl = `${instance}/latest_version?id=${videoId}&itag=18`;
+            console.log(`🔍 Checking API: ${instance}`);
             
-            console.log(`🔄 Trying mirror: ${instance}`);
+            // 1. Ask the API for video metadata
+            // We set a 3-second timeout so we don't get stuck on a slow mirror
+            const apiUrl = `${instance}/api/v1/videos/${videoId}`;
+            const apiRes = await axios.get(apiUrl, { timeout: 3500 });
 
-            // Fetch the stream from the mirror
-            const response = await axios({
-                method: 'get',
-                url: directStreamUrl,
-                responseType: 'stream',
-                timeout: 10000 // 10s timeout
-            });
-
-            // Set headers
-            res.header('Content-Type', 'video/mp4');
-            res.header('Access-Control-Allow-Origin', '*');
+            // 2. Find a compatible stream (mp4, containing audio+video)
+            // Invidious calls these "formatStreams"
+            const streams = apiRes.data.formatStreams;
             
-            // Pipe the clean stream to your frontend
-            response.data.pipe(res);
-            return; // ✅ Success, stop the loop
+            // Look for 360p first (most reliable), then any mp4
+            let chosenStream = streams.find(s => s.qualityLabel === '360p' && s.container === 'mp4');
+            if (!chosenStream) chosenStream = streams.find(s => s.container === 'mp4');
 
+            if (chosenStream) {
+                console.log(`✅ Found stream at ${instance}`);
+                
+                // 3. Stream the file!
+                const videoStream = await axios({
+                    method: 'get',
+                    url: chosenStream.url,
+                    responseType: 'stream',
+                    timeout: 20000, // 20s timeout for the stream itself
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                });
+
+                // Set headers and pipe
+                res.header('Content-Type', 'video/mp4');
+                res.header('Access-Control-Allow-Origin', '*');
+                videoStream.data.pipe(res);
+                return; // Stop the loop, we are done!
+            }
         } catch (err) {
-            console.log(`⚠️ Mirror ${instance} failed, trying next...`);
+            // Just log and continue to the next mirror
+            // console.log(`⚠️ Skipped ${instance}: ${err.message}`);
         }
     }
 
-    // If all mirrors fail
-    res.status(500).send("All mirrors busy. Try again.");
+    console.log("❌ All mirrors failed.");
+    res.status(500).send("All mirrors busy. Please try again.");
 });
 
 // --- STANDARD WATCH PARTY LOGIC ---
@@ -103,7 +120,6 @@ io.on('connection', (socket) => {
     roomHosts[roomId] = socket.id;
     socketRoomMap[socket.id] = roomId;
     roomHostNames[roomId] = username;
-    
     socket.to(roomId).emit('host-name', username);
     broadcastToHost(roomId);
   });
