@@ -3,7 +3,7 @@ const http = require('http');
 const { Server } = require("socket.io");
 const { ExpressPeerServer } = require("peer");
 const cors = require('cors');
-const ytdl = require('@distube/ytdl-core'); // ✅ IMPORT YTDL
+const ytdl = require('@distube/ytdl-core'); 
 
 const app = express();
 const server = http.createServer(app);
@@ -24,43 +24,60 @@ const io = new Server(server, {
   transports: ['polling', 'websocket'] 
 });
 
-// 🍪 COOKIE SETUP (The Fix for 403 Errors)
+// 🍪 COOKIE SETUP
 let agent;
 try {
     const cookieString = process.env.YOUTUBE_COOKIES;
     if (cookieString) {
         const cookies = JSON.parse(cookieString);
         agent = ytdl.createAgent(cookies);
-        console.log("✅ YouTube Cookies loaded successfully.");
+        console.log("✅ YouTube Cookies loaded.");
     } else {
-        console.log("⚠️ No YOUTUBE_COOKIES found in environment variables.");
+        console.log("⚠️ No YOUTUBE_COOKIES found. YouTube links might fail (403).");
     }
 } catch (error) {
-    console.error("❌ Error parsing YOUTUBE_COOKIES:", error.message);
+    console.error("❌ Error parsing cookies:", error.message);
 }
 
-// 📺 YOUTUBE ROUTE
+// 📺 YOUTUBE ROUTE (UPDATED FIX)
 app.get('/youtube', (req, res) => {
     const videoUrl = req.query.url;
     if(!videoUrl) return res.status(400).send('No URL provided');
 
+    // Headers to allow streaming to your frontend
     res.header('Content-Type', 'video/mp4');
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Cross-Origin-Resource-Policy', 'cross-origin');
 
     try {
-        // Pass the 'agent' (cookies) to prove we are human
         ytdl(videoUrl, { 
-            agent: agent, 
-            quality: '18' // Quality 18 = 360p (Single file, best for streaming)
+            agent: agent,
+            
+            // ✅ FIX 1: Relax the filter. 
+            // 'audioandvideo' grabs ANY container (mp4/webm) that has both.
+            filter: 'audioandvideo', 
+            
+            // ✅ FIX 2: High Water Mark
+            // Buffers more data (32MB) to keep the stream stable.
+            highWaterMark: 1 << 25, 
+            
+            // ✅ FIX 3: Force IPv4
+            // YouTube often blocks IPv6 requests from data centers (like Render).
+            requestOptions: {
+                family: 4 
+            }
         }).pipe(res);
+        
     } catch (err) {
         console.error("YouTube Stream Error:", err);
-        res.status(500).send("Stream Error");
+        // Only send error if headers haven't been sent yet
+        if (!res.headersSent) {
+            res.status(500).send("Stream Error");
+        }
     }
 });
 
-// --- STANDARD WATCH PARTY LOGIC BELOW ---
+// --- STANDARD WATCH PARTY LOGIC ---
 
 // Storage
 const roomHosts = {};      // roomId -> hostSocketId
@@ -85,7 +102,6 @@ io.on('connection', (socket) => {
     socketRoomMap[socket.id] = roomId;
     
     roomHostNames[roomId] = username;
-    
     console.log(`👑 Host ${username} created room ${roomId}`);
     
     socket.to(roomId).emit('host-name', username);
@@ -98,9 +114,7 @@ io.on('connection', (socket) => {
     socketRoomMap[socket.id] = roomId;
 
     if (!roomUsers[roomId]) roomUsers[roomId] = [];
-    
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username && u.socketId !== socket.id);
-    
     roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
 
     console.log(`👤 Viewer ${username} joined ${roomId}`);
