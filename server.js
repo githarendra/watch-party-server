@@ -4,6 +4,7 @@ const { Server } = require("socket.io");
 const { ExpressPeerServer } = require("peer");
 const cors = require('cors');
 const axios = require('axios'); 
+const ytdl = require('@distube/ytdl-core');
 
 const app = express();
 const server = http.createServer(app);
@@ -24,73 +25,98 @@ const io = new Server(server, {
   transports: ['polling', 'websocket'] 
 });
 
-// 📺 YOUTUBE PROXY ROUTE (Via Cobalt API)
+// 🍪 COOKIE SETUP (For Backup Method)
+let agent;
+try {
+    if (process.env.YOUTUBE_COOKIES) {
+        agent = ytdl.createAgent(JSON.parse(process.env.YOUTUBE_COOKIES));
+        console.log("✅ Cookies loaded.");
+    }
+} catch (e) { console.log("⚠️ Cookie error:", e.message); }
+
+// 📺 YOUTUBE PROXY ROUTE
 app.get('/youtube', async (req, res) => {
     const videoUrl = req.query.url;
-    if(!videoUrl) return res.status(400).send('Invalid YouTube URL');
+    if(!videoUrl) return res.status(400).send('Invalid URL');
 
-    // List of Cobalt instances (Reliable YouTube-to-MP4 converters)
-    const instances = [
+    console.log(`🎥 Processing: ${videoUrl}`);
+
+    // --- STRATEGY 1: COBALT API (With Browser Headers) ---
+    const cobaltInstances = [
         "https://api.cobalt.tools",
-        "https://co.wuk.sh",
         "https://cobalt.steamys.com",
-        "https://cobalt.tools"
+        "https://co.wuk.sh",
+        "https://api.server.cobalt.tools"
     ];
 
-    console.log(`🎥 Processing YouTube URL via Cobalt: ${videoUrl}`);
-
-    for (const instance of instances) {
+    for (const instance of cobaltInstances) {
         try {
-            console.log(`🔍 Trying instance: ${instance}`);
+            console.log(`🔍 Trying Cobalt: ${instance}`);
             
-            // 1. Ask Cobalt for a direct MP4 link
-            const cobaltResponse = await axios.post(`${instance}/api/json`, {
+            // 1. Get the Direct Link (Spoofing a Browser)
+            const cobaltRes = await axios.post(`${instance}/api/json`, {
                 url: videoUrl,
-                vCodec: 'h264',    // Ensure compatibility
-                vQuality: '480',   // 480p is best balance of quality vs speed for streaming
-                aFormat: 'mp3',
-                isAudioOnly: false
+                vQuality: "480",
+                filenamePattern: "classic",
+                isAudioOnly: false,
+                disableMetadata: true
             }, {
                 headers: {
                     'Accept': 'application/json',
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', // 👈 FAKE BROWSER
+                    'Origin': 'https://cobalt.tools',
+                    'Referer': 'https://cobalt.tools/'
                 },
-                timeout: 5000 
+                timeout: 6000
             });
 
-            const downloadUrl = cobaltResponse.data.url;
+            const downloadUrl = cobaltRes.data.url;
 
             if (downloadUrl) {
-                console.log(`✅ Cobalt returned link. Streaming...`);
+                console.log(`✅ Cobalt Success. Streaming...`);
                 
-                // 2. Stream the file from the direct link
+                // 2. Stream the file
                 const videoStream = await axios({
                     method: 'get',
                     url: downloadUrl,
                     responseType: 'stream',
                     timeout: 20000,
                     headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                     }
                 });
 
-                // 3. Pipe to Frontend
                 res.header('Content-Type', 'video/mp4');
                 res.header('Access-Control-Allow-Origin', '*');
                 videoStream.data.pipe(res);
-                return; // Success!
+                return; // Done!
             }
-
         } catch (err) {
-            // console.log(`⚠️ Instance ${instance} failed: ${err.message}`);
+            // console.log(`⚠️ ${instance} failed.`);
         }
     }
 
-    console.log("❌ All Cobalt instances failed.");
-    res.status(500).send("Unable to process video. Try a different link.");
+    // --- STRATEGY 2: YTDL BACKUP (TV_EMBEDDED CLIENT) ---
+    // If Cobalt fails, we try accessing YouTube as a Smart TV (Bypasses many blocks)
+    try {
+        console.log("⚠️ Cobalt failed. Trying YouTube TV Client...");
+        
+        ytdl(videoUrl, {
+            agent: agent,
+            clients: ['TV_EMBEDDED', 'IOS'], // 👈 Bypass logic
+            quality: '18', // 360p MP4
+            requestOptions: { family: 4 } // Force IPv4
+        }).pipe(res);
+        return;
+
+    } catch (ytdlErr) {
+        console.error("❌ All methods failed:", ytdlErr.message);
+        res.status(500).send("Unable to load video. YouTube is blocking this server.");
+    }
 });
 
-// --- STANDARD WATCH PARTY LOGIC ---
+// --- WATCH PARTY LOGIC ---
 
 const roomHosts = {};      
 const roomUsers = {};      
