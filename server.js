@@ -3,6 +3,8 @@ const http = require('http');
 const { Server } = require("socket.io");
 const { ExpressPeerServer } = require("peer");
 const cors = require('cors');
+// ✅ NEW: Import YouTube Downloader
+const ytdl = require('@distube/ytdl-core');
 
 const app = express();
 const server = http.createServer(app);
@@ -23,10 +25,32 @@ const io = new Server(server, {
   transports: ['polling', 'websocket'] 
 });
 
+// ✅ NEW: YouTube Proxy Route
+app.get('/youtube', (req, res) => {
+    const videoUrl = req.query.url;
+    if(!videoUrl) return res.status(400).send('No URL provided');
+
+    // Headers to allow streaming to your frontend
+    res.header('Content-Type', 'video/mp4');
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Cross-Origin-Resource-Policy', 'cross-origin');
+
+    try {
+        // Stream the video. Quality 18 is approx 360p (single file video+audio)
+        // This is perfect for WebRTC re-streaming.
+        ytdl(videoUrl, { 
+            quality: '18' 
+        }).pipe(res);
+    } catch (err) {
+        console.error("YouTube Stream Error:", err);
+        res.status(500).send("Stream Error");
+    }
+});
+
 // Storage
 const roomHosts = {};      // roomId -> hostSocketId
 const roomUsers = {};      // roomId -> [ { socketId, username, status } ]
-const roomHostNames = {};  // roomId -> "Harry" (Fixes the Room Name bug)
+const roomHostNames = {};  // roomId -> "Harry" 
 const socketRoomMap = {};  // socketId -> roomId
 
 const broadcastToHost = (roomId) => {
@@ -75,7 +99,7 @@ io.on('connection', (socket) => {
     
     socket.to(roomId).emit('user-connected', userId);
 
-    // ✅ SEND HOST NAME IMMEDIATELY (Fixes "Party's Room" bug)
+    // ✅ SEND HOST NAME IMMEDIATELY 
     if (roomHostNames[roomId]) {
         socket.emit('host-name', roomHostNames[roomId]);
     }
