@@ -31,71 +31,84 @@ const getVideoId = (url) => {
     return match ? match[1] : null;
 };
 
-// 📺 YOUTUBE PROXY ROUTE (Robust API Method)
+// 📺 YOUTUBE PROXY ROUTE (Using Piped API)
 app.get('/youtube', async (req, res) => {
     const videoUrl = req.query.url;
     const videoId = getVideoId(videoUrl);
 
     if(!videoId) return res.status(400).send('Invalid YouTube URL');
 
-    // ✅ NEW: Stronger List of Public Mirrors
+    // ✅ LIST OF PIPED API INSTANCES (More stable than Invidious)
     const instances = [
-        "https://inv.tux.pizza",
-        "https://invidious.drgns.space",
-        "https://invidious.fdn.fr",
-        "https://vid.puffyan.us",
-        "https://invidious.perennialteks.com",
-        "https://yt.artemislena.eu",
-        "https://invidious.protokolla.fi"
+        "https://pipedapi.kavin.rocks",
+        "https://api.piped.privacy.com.de",
+        "https://pipedapi.tokhmi.xyz",
+        "https://api.piped.projectsegfau.lt",
+        "https://pipedapi.moomoo.me"
     ];
 
-    console.log(`🎥 Fetching YouTube ID: ${videoId}`);
+    console.log(`🎥 Fetching Piped Stream for: ${videoId}`);
 
     for (const instance of instances) {
         try {
             console.log(`🔍 Checking API: ${instance}`);
             
-            // 1. Ask the API for video metadata
-            // We set a 3-second timeout so we don't get stuck on a slow mirror
-            const apiUrl = `${instance}/api/v1/videos/${videoId}`;
-            const apiRes = await axios.get(apiUrl, { timeout: 3500 });
+            // 1. Fetch video data from Piped
+            const apiUrl = `${instance}/streams/${videoId}`;
+            const apiRes = await axios.get(apiUrl, { timeout: 4000 });
 
-            // 2. Find a compatible stream (mp4, containing audio+video)
-            // Invidious calls these "formatStreams"
-            const streams = apiRes.data.formatStreams;
+            // 2. Extract valid streams
+            const audioStreams = apiRes.data.audioStreams;
+            const videoStreams = apiRes.data.videoStreams;
+
+            // We need a combined stream (video+audio) for simplicity, or we proxy just the video 
+            // Piped separates them often, BUT usually has a 'hls' link or 'related' format.
+            // Actually, simplest strategy: Find a video stream with sound, or proxy the HLS file.
             
-            // Look for 360p first (most reliable), then any mp4
-            let chosenStream = streams.find(s => s.qualityLabel === '360p' && s.container === 'mp4');
-            if (!chosenStream) chosenStream = streams.find(s => s.container === 'mp4');
+            // Look for a standard mp4 stream first
+            let chosenStream = videoStreams.find(s => s.videoOnly === false && s.format === 'MPEG-4');
+            
+            // If Piped only gives separate streams (common), we fallback to HLS (Master Playlist)
+            // HLS (.m3u8) works natively in Safari/iOS, but Chrome needs hls.js. 
+            // YOUR PLAYER USES NATIVE HTML5, so we really need a single .mp4 file.
+            
+            // Forcefully look for ANY stream that isn't videoOnly.
+            if (!chosenStream) {
+                // Some piped instances return combined streams in specific formats
+                 chosenStream = videoStreams.find(s => s.videoOnly === false);
+            }
 
             if (chosenStream) {
                 console.log(`✅ Found stream at ${instance}`);
                 
-                // 3. Stream the file!
                 const videoStream = await axios({
                     method: 'get',
                     url: chosenStream.url,
                     responseType: 'stream',
-                    timeout: 20000, // 20s timeout for the stream itself
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                    }
+                    timeout: 20000,
                 });
 
-                // Set headers and pipe
                 res.header('Content-Type', 'video/mp4');
                 res.header('Access-Control-Allow-Origin', '*');
                 videoStream.data.pipe(res);
-                return; // Stop the loop, we are done!
+                return; 
+            } else {
+                // If Piped splits audio/video, we can't easily merge them on the fly without ffmpeg.
+                // Fallback: Try to use the HLS link if available, but browsers might not play it.
+                // Let's look for the 'hls' field in response.
+                 if (apiRes.data.hls) {
+                    // HLS is tricky without a special player. Let's stick to searching instances.
+                    console.log(`⚠️ ${instance} only had split streams. Skipping.`);
+                 }
             }
+
         } catch (err) {
-            // Just log and continue to the next mirror
             // console.log(`⚠️ Skipped ${instance}: ${err.message}`);
         }
     }
 
-    console.log("❌ All mirrors failed.");
-    res.status(500).send("All mirrors busy. Please try again.");
+    console.log("❌ All Piped mirrors failed or returned split streams.");
+    res.status(500).send("No compatible MP4 stream found. Try another link.");
 });
 
 // --- STANDARD WATCH PARTY LOGIC ---
