@@ -32,47 +32,46 @@ try {
         const cookies = JSON.parse(cookieString);
         agent = ytdl.createAgent(cookies);
         console.log("✅ YouTube Cookies loaded.");
-    } else {
-        console.log("⚠️ No YOUTUBE_COOKIES found. YouTube links might fail (403).");
     }
 } catch (error) {
     console.error("❌ Error parsing cookies:", error.message);
 }
 
-// 📺 YOUTUBE ROUTE (UPDATED FIX)
-app.get('/youtube', (req, res) => {
+// 📺 YOUTUBE ROUTE (UPDATED WITH ANDROID CLIENT FIX)
+app.get('/youtube', async (req, res) => {
     const videoUrl = req.query.url;
     if(!videoUrl) return res.status(400).send('No URL provided');
 
-    // Headers to allow streaming to your frontend
     res.header('Content-Type', 'video/mp4');
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Cross-Origin-Resource-Policy', 'cross-origin');
 
     try {
-        ytdl(videoUrl, { 
+        // 1. Get Info first using 'ANDROID' client (Less strict than WEB)
+        const info = await ytdl.getInfo(videoUrl, {
             agent: agent,
-            
-            // ✅ FIX 1: Relax the filter. 
-            // 'audioandvideo' grabs ANY container (mp4/webm) that has both.
-            filter: 'audioandvideo', 
-            
-            // ✅ FIX 2: High Water Mark
-            // Buffers more data (32MB) to keep the stream stable.
-            highWaterMark: 1 << 25, 
-            
-            // ✅ FIX 3: Force IPv4
-            // YouTube often blocks IPv6 requests from data centers (like Render).
-            requestOptions: {
-                family: 4 
-            }
-        }).pipe(res);
-        
+            // ⚠️ THIS IS THE KEY FIX: Pretend to be a Phone app
+            clients: ['ANDROID', 'IOS'] 
+        });
+
+        // 2. Choose the best format that has both video + audio
+        const format = ytdl.chooseFormat(info.formats, { 
+            quality: '18', // Try 360p first (most reliable)
+            filter: 'audioandvideo' 
+        });
+
+        if (!format) {
+             throw new Error("No compatible video format found.");
+        }
+
+        // 3. Download that specific format
+        ytdl.downloadFromInfo(info, { format: format })
+            .pipe(res);
+
     } catch (err) {
-        console.error("YouTube Stream Error:", err);
-        // Only send error if headers haven't been sent yet
+        console.error("YouTube Stream Error:", err.message);
         if (!res.headersSent) {
-            res.status(500).send("Stream Error");
+            res.status(500).send("Stream Error: " + err.message);
         }
     }
 });
@@ -102,7 +101,6 @@ io.on('connection', (socket) => {
     socketRoomMap[socket.id] = roomId;
     
     roomHostNames[roomId] = username;
-    console.log(`👑 Host ${username} created room ${roomId}`);
     
     socket.to(roomId).emit('host-name', username);
     broadcastToHost(roomId);
@@ -116,8 +114,6 @@ io.on('connection', (socket) => {
     if (!roomUsers[roomId]) roomUsers[roomId] = [];
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username && u.socketId !== socket.id);
     roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
-
-    console.log(`👤 Viewer ${username} joined ${roomId}`);
 
     broadcastToHost(roomId);
     socket.to(roomId).emit('user-connected', userId);
@@ -159,7 +155,6 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('video-sync', data);
   });
 
-  // KICK USER
   socket.on('kick-user', ({ roomId, socketId }) => {
       io.to(socketId).emit('kicked');
       if (roomUsers[roomId]) {
