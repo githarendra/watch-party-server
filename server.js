@@ -24,91 +24,70 @@ const io = new Server(server, {
   transports: ['polling', 'websocket'] 
 });
 
-// Helper: Extract Video ID
-const getVideoId = (url) => {
-    const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
-    const match = url.match(regex);
-    return match ? match[1] : null;
-};
-
-// 📺 YOUTUBE PROXY ROUTE (Using Piped API)
+// 📺 YOUTUBE PROXY ROUTE (Via Cobalt API)
 app.get('/youtube', async (req, res) => {
     const videoUrl = req.query.url;
-    const videoId = getVideoId(videoUrl);
+    if(!videoUrl) return res.status(400).send('Invalid YouTube URL');
 
-    if(!videoId) return res.status(400).send('Invalid YouTube URL');
-
-    // ✅ LIST OF PIPED API INSTANCES (More stable than Invidious)
+    // List of Cobalt instances (Reliable YouTube-to-MP4 converters)
     const instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://api.piped.privacy.com.de",
-        "https://pipedapi.tokhmi.xyz",
-        "https://api.piped.projectsegfau.lt",
-        "https://pipedapi.moomoo.me"
+        "https://api.cobalt.tools",
+        "https://co.wuk.sh",
+        "https://cobalt.steamys.com",
+        "https://cobalt.tools"
     ];
 
-    console.log(`🎥 Fetching Piped Stream for: ${videoId}`);
+    console.log(`🎥 Processing YouTube URL via Cobalt: ${videoUrl}`);
 
     for (const instance of instances) {
         try {
-            console.log(`🔍 Checking API: ${instance}`);
+            console.log(`🔍 Trying instance: ${instance}`);
             
-            // 1. Fetch video data from Piped
-            const apiUrl = `${instance}/streams/${videoId}`;
-            const apiRes = await axios.get(apiUrl, { timeout: 4000 });
+            // 1. Ask Cobalt for a direct MP4 link
+            const cobaltResponse = await axios.post(`${instance}/api/json`, {
+                url: videoUrl,
+                vCodec: 'h264',    // Ensure compatibility
+                vQuality: '480',   // 480p is best balance of quality vs speed for streaming
+                aFormat: 'mp3',
+                isAudioOnly: false
+            }, {
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                timeout: 5000 
+            });
 
-            // 2. Extract valid streams
-            const audioStreams = apiRes.data.audioStreams;
-            const videoStreams = apiRes.data.videoStreams;
+            const downloadUrl = cobaltResponse.data.url;
 
-            // We need a combined stream (video+audio) for simplicity, or we proxy just the video 
-            // Piped separates them often, BUT usually has a 'hls' link or 'related' format.
-            // Actually, simplest strategy: Find a video stream with sound, or proxy the HLS file.
-            
-            // Look for a standard mp4 stream first
-            let chosenStream = videoStreams.find(s => s.videoOnly === false && s.format === 'MPEG-4');
-            
-            // If Piped only gives separate streams (common), we fallback to HLS (Master Playlist)
-            // HLS (.m3u8) works natively in Safari/iOS, but Chrome needs hls.js. 
-            // YOUR PLAYER USES NATIVE HTML5, so we really need a single .mp4 file.
-            
-            // Forcefully look for ANY stream that isn't videoOnly.
-            if (!chosenStream) {
-                // Some piped instances return combined streams in specific formats
-                 chosenStream = videoStreams.find(s => s.videoOnly === false);
-            }
-
-            if (chosenStream) {
-                console.log(`✅ Found stream at ${instance}`);
+            if (downloadUrl) {
+                console.log(`✅ Cobalt returned link. Streaming...`);
                 
+                // 2. Stream the file from the direct link
                 const videoStream = await axios({
                     method: 'get',
-                    url: chosenStream.url,
+                    url: downloadUrl,
                     responseType: 'stream',
                     timeout: 20000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
                 });
 
+                // 3. Pipe to Frontend
                 res.header('Content-Type', 'video/mp4');
                 res.header('Access-Control-Allow-Origin', '*');
                 videoStream.data.pipe(res);
-                return; 
-            } else {
-                // If Piped splits audio/video, we can't easily merge them on the fly without ffmpeg.
-                // Fallback: Try to use the HLS link if available, but browsers might not play it.
-                // Let's look for the 'hls' field in response.
-                 if (apiRes.data.hls) {
-                    // HLS is tricky without a special player. Let's stick to searching instances.
-                    console.log(`⚠️ ${instance} only had split streams. Skipping.`);
-                 }
+                return; // Success!
             }
 
         } catch (err) {
-            // console.log(`⚠️ Skipped ${instance}: ${err.message}`);
+            // console.log(`⚠️ Instance ${instance} failed: ${err.message}`);
         }
     }
 
-    console.log("❌ All Piped mirrors failed or returned split streams.");
-    res.status(500).send("No compatible MP4 stream found. Try another link.");
+    console.log("❌ All Cobalt instances failed.");
+    res.status(500).send("Unable to process video. Try a different link.");
 });
 
 // --- STANDARD WATCH PARTY LOGIC ---
