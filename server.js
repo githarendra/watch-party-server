@@ -3,8 +3,7 @@ const http = require('http');
 const { Server } = require("socket.io");
 const { ExpressPeerServer } = require("peer");
 const cors = require('cors');
-// ✅ NEW: Import YouTube Downloader
-const ytdl = require('@distube/ytdl-core');
+const ytdl = require('@distube/ytdl-core'); // ✅ IMPORT YTDL
 
 const app = express();
 const server = http.createServer(app);
@@ -25,21 +24,35 @@ const io = new Server(server, {
   transports: ['polling', 'websocket'] 
 });
 
-// ✅ NEW: YouTube Proxy Route
+// 🍪 COOKIE SETUP (The Fix for 403 Errors)
+let agent;
+try {
+    const cookieString = process.env.YOUTUBE_COOKIES;
+    if (cookieString) {
+        const cookies = JSON.parse(cookieString);
+        agent = ytdl.createAgent(cookies);
+        console.log("✅ YouTube Cookies loaded successfully.");
+    } else {
+        console.log("⚠️ No YOUTUBE_COOKIES found in environment variables.");
+    }
+} catch (error) {
+    console.error("❌ Error parsing YOUTUBE_COOKIES:", error.message);
+}
+
+// 📺 YOUTUBE ROUTE
 app.get('/youtube', (req, res) => {
     const videoUrl = req.query.url;
     if(!videoUrl) return res.status(400).send('No URL provided');
 
-    // Headers to allow streaming to your frontend
     res.header('Content-Type', 'video/mp4');
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Cross-Origin-Resource-Policy', 'cross-origin');
 
     try {
-        // Stream the video. Quality 18 is approx 360p (single file video+audio)
-        // This is perfect for WebRTC re-streaming.
+        // Pass the 'agent' (cookies) to prove we are human
         ytdl(videoUrl, { 
-            quality: '18' 
+            agent: agent, 
+            quality: '18' // Quality 18 = 360p (Single file, best for streaming)
         }).pipe(res);
     } catch (err) {
         console.error("YouTube Stream Error:", err);
@@ -47,10 +60,12 @@ app.get('/youtube', (req, res) => {
     }
 });
 
+// --- STANDARD WATCH PARTY LOGIC BELOW ---
+
 // Storage
 const roomHosts = {};      // roomId -> hostSocketId
 const roomUsers = {};      // roomId -> [ { socketId, username, status } ]
-const roomHostNames = {};  // roomId -> "Harry" 
+const roomHostNames = {};  // roomId -> "Harry"
 const socketRoomMap = {};  // socketId -> roomId
 
 const broadcastToHost = (roomId) => {
@@ -69,12 +84,10 @@ io.on('connection', (socket) => {
     roomHosts[roomId] = socket.id;
     socketRoomMap[socket.id] = roomId;
     
-    // ✅ Store Name for Viewers
     roomHostNames[roomId] = username;
     
     console.log(`👑 Host ${username} created room ${roomId}`);
     
-    // Broadcast name to anyone already waiting
     socket.to(roomId).emit('host-name', username);
     broadcastToHost(roomId);
   });
@@ -86,20 +99,15 @@ io.on('connection', (socket) => {
 
     if (!roomUsers[roomId]) roomUsers[roomId] = [];
     
-    // Remove duplicates
     roomUsers[roomId] = roomUsers[roomId].filter(u => u.username !== username && u.socketId !== socket.id);
     
-    // ✅ Initialize User with Status
     roomUsers[roomId].push({ socketId: socket.id, username, status: 'LIVE' });
 
     console.log(`👤 Viewer ${username} joined ${roomId}`);
 
-    // Update Host with new count/list
     broadcastToHost(roomId);
-    
     socket.to(roomId).emit('user-connected', userId);
 
-    // ✅ SEND HOST NAME IMMEDIATELY 
     if (roomHostNames[roomId]) {
         socket.emit('host-name', roomHostNames[roomId]);
     }
@@ -118,13 +126,12 @@ io.on('connection', (socket) => {
       io.to(targetSocketId).emit('video-sync', { type: state, time });
   });
 
-  // 5️⃣ VIEWER STATUS UPDATE (Watching/Paused)
+  // 5️⃣ VIEWER STATUS UPDATE
   socket.on('viewer-status-update', ({ roomId, status }) => {
       if (roomUsers[roomId]) {
           const user = roomUsers[roomId].find(u => u.socketId === socket.id);
           if (user) {
               user.status = status;
-              // Update Host
               broadcastToHost(roomId);
           }
       }
@@ -138,17 +145,12 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('video-sync', data);
   });
 
-  // ✅ KICK USER FUNCTIONALITY
+  // KICK USER
   socket.on('kick-user', ({ roomId, socketId }) => {
-      // 1. Notify User
       io.to(socketId).emit('kicked');
-      
-      // 2. Remove from List
       if (roomUsers[roomId]) {
           roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socketId);
       }
-      
-      // 3. Update Host UI
       broadcastToHost(roomId);
   });
 
@@ -161,12 +163,10 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const roomId = socketRoomMap[socket.id];
     if (roomId) {
-        // If Viewer Left
         if (roomUsers[roomId]) {
             roomUsers[roomId] = roomUsers[roomId].filter(u => u.socketId !== socket.id);
             broadcastToHost(roomId);
         }
-        // If Host Left
         if (roomHosts[roomId] === socket.id) {
             io.to(roomId).emit('broadcast-stopped'); 
             delete roomHosts[roomId];
